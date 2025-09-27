@@ -4,18 +4,20 @@ import sqlite3
 import asyncio
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from flask import Flask
+from threading import Thread
 
 # ===== Logging =====
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ===== Config =====
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Render এ Env var হিসেবে দিবেন
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN env variable is missing!")
 
-CHANNEL_ID = -1002742606192  # আপনার চ্যানেল আইডি
-GROUP_ID = -1002892874648    # আপনার গ্রুপ আইডি
+CHANNEL_ID = -1002742606192
+GROUP_ID = -1002892874648
 
 # ===== SQLite DB =====
 DB_PATH = "anime_cache.db"
@@ -78,7 +80,7 @@ async def cache_channel_messages(application: Application, limit: int = 1000):
             text = msg.text or msg.caption or ""
             if not text:
                 continue
-            title = text.splitlines()[0].strip().lower()
+            title = text.splitlines()[0].strip().lower()  # First line as title
             try:
                 post_link = msg.link
             except Exception:
@@ -88,18 +90,46 @@ async def cache_channel_messages(application: Application, limit: int = 1000):
         logger.exception("Error caching channel messages: %s", e)
     logger.info("Caching done.")
 
-# ===== Main =====
-async def main():
-    init_db()
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_message_handler))
+# ===== Flask Web Server =====
+app = Flask(__name__)
 
-    # চ্যানেলের পোস্ট ক্যাশ
-    await cache_channel_messages(app)
+def run_bot(application):
+    # স্টার্ট-আপ মেসেজ গ্রুপে পাঠাও
+    try:
+        logger.info("Sending startup message to group...")
+        application.bot.send_message(GROUP_ID, "🎉 Bot has started successfully! I am now online and ready to help. 😊")
+    except Exception as e:
+        logger.error(f"Failed to send startup message: {e}")
 
-    # Polling মোডে চালানো
     logger.info("Bot is running in polling mode...")
-    await app.run_polling()
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+
+def keep_alive():
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+
+@app.route('/')
+def health_check():
+    return "Bot is running", 200
+
+# ===== Main =====
+async def start_bot():
+    init_db()
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_message_handler))
+
+    # Cache channel messages in a separate thread
+    cache_thread = Thread(target=lambda: asyncio.run(cache_channel_messages(application)))
+    cache_thread.start()
+
+    # Start bot polling in a separate thread
+    bot_thread = Thread(target=lambda: run_bot(application))
+    bot_thread.start()
+
+    # Start Flask server
+    keep_alive()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(start_bot())
